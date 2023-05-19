@@ -1,0 +1,814 @@
+import sys
+import serial
+import csv
+import datetime
+import os
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QComboBox, QGridLayout, QCheckBox, QHeaderView, QMenu,
+                             QMessageBox, QRadioButton,QLabel, QButtonGroup, QTabWidget, QGroupBox, QLineEdit, QSpinBox, QTableView, QScrollArea, 
+                             QMenuBar, QAction)
+from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal, QSettings, QRegExp
+from PyQt5.QtGui import QIcon, QStandardItemModel, QStandardItem, QCloseEvent, QRegExpValidator
+import pyqtgraph as pg
+import numpy as np
+import serial.tools.list_ports
+import time
+
+class SerialReader(QObject):
+    data_received = pyqtSignal(np.ndarray)
+    counter_received = pyqtSignal(np.uint16)
+
+    def __init__(self, serial_port, baud_rate, no_of_channels, datalength, custom_frame_mode, counter_mode, framestart_trigger, 
+                 dataBit_length_list, datatype_list, datatype):
+        super().__init__()
+        self.serial = serial.Serial(serial_port, baud_rate, timeout=0.01)
+        self.framestart_trigger = framestart_trigger
+        self.is_started = False
+        self.no_of_channels = no_of_channels
+        self.datalength = datalength
+        self.custom_frame_mode = custom_frame_mode
+        self.counter_mode = counter_mode
+        self.dataBit_length_list = dataBit_length_list
+        self.datatype_list = datatype_list
+        self.datatype = datatype
+        self.is_paused = False
+
+    def read(self):
+        while True:
+            try:
+                if not self.is_paused:
+                    data = self.serial.read(self.serial.in_waiting)
+                    # print(f"data = {data}")
+                    if data:
+                        print(f"data = {[data for data in data]}")
+                        # print(f"len(data) = {len(data)}")
+                        #custom frame
+                        if self.custom_frame_mode == 1: 
+                            frame_start_length = int(self.dataBit_length_list[0])
+                            frame_start_mask = (1 << frame_start_length) - 1
+                            i = 0
+                            print(f"frame_start_mask = {frame_start_mask}")
+                            while len(data) - i >= self.datalength:
+                                self.channel_data = []
+                                if ((data[i] >> (8-frame_start_length)) & frame_start_mask) == self.framestart_trigger:
+                                    frame_bit = data[i]
+                                    byte_group = data[i+1:i+self.datalength]
+                                    byte_group = self.byteswap(byte_group)
+                                    byte_array = bytearray(byte_group)
+                                    byte_array.insert(0,frame_bit)
+                                    byte_group = bytes(byte_array)
+                                    self.processing(byte_group)
+                                    i = i + self.datalength
+                                else:
+                                    i = i + 1
+
+                        #simple binary
+                        else:
+                            frame = self.byteswap(data)
+                            i = 0
+                            while i < len(frame):
+                                self.channel_data = []
+                                byte_group = frame[i:i+int(self.datatype*(self.no_of_channels+self.counter_mode)/8)]
+                                print(f"byte_group == {byte_group}")
+                                i += int(self.datatype*(self.no_of_channels+self.counter_mode)/8)
+                                self.processing(byte_group)
+                    break
+                else:
+                    time.sleep(0.1)
+            except serial.SerialException as e:
+                print(f"Error: {e}")
+                print("Waiting for 1 second before retrying...")
+                time.sleep(1)
+
+    def processing(self,data): #process and sends data to plot
+        bits = ''.join(format(byte, '08b') for byte in data)
+        print(f"bits = {[data for data in bits]}")
+        prev_data_length = 0
+        if (self.custom_frame_mode == 1) & (self.counter_mode == 1):
+            start_bit = self.dataBit_length_list[0] + self.dataBit_length_list[1]
+            self.counter = bits[self.dataBit_length_list[0]:self.dataBit_length_list[0]+self.dataBit_length_list[1]]
+        elif (self.custom_frame_mode == 1) & (self.counter_mode == 0):
+            start_bit = self.dataBit_length_list[0]
+        elif (self.custom_frame_mode == 0) & (self.counter_mode == 1):
+            start_bit = self.dataBit_length_list[0]
+            self.counter = bits[:self.dataBit_length_list[0]]
+        else:
+            start_bit = 0
+        for i in range(self.no_of_channels):
+            data_length = self.dataBit_length_list[i + self.custom_frame_mode + self.counter_mode]
+            if self.datatype_list[i] == 0:
+                channel_data_val = np.uint32(int(bits[start_bit+prev_data_length:start_bit+prev_data_length+data_length], 2))
+            else:
+                channel_data_val = np.int32(self.twos_comp(int(bits[start_bit+prev_data_length:start_bit+prev_data_length+data_length], 2), self.datatype))
+            self.channel_data.append(channel_data_val)
+            prev_data_length = prev_data_length + data_length
+
+        #send data to plot
+        if self.counter_mode == 1:
+            self.counter = np.uint16(int(self.counter, 2))
+            self.counter_received.emit(self.counter)
+            # print(f"counter = {self.counter}")
+            
+        self.channel_data = np.array(self.channel_data)
+        # if len(self.channel_data) != self.no_of_channels:
+        #     raise ValueError
+        self.data_received.emit(self.channel_data)
+        print(f"channel_data = {self.channel_data}")
+
+    def byteswap(self, frame):
+        swapped_data = []
+        length = int(self.datatype/8)
+        if length == 2:
+            for i in range(0, len(frame), length):
+                swapped_data.extend(reversed(frame[i:i+4]))
+        elif length == 4:
+            for i in range(0, len(frame), length):
+                swapped_data.extend(reversed(frame[i:i+4]))
+        else:
+            swapped_data = frame
+        print(f"swapped data = {swapped_data}")
+        return swapped_data
+
+    def twos_comp(self, val, bits):
+        """compute the 2's complement of int value val"""
+        if (val & (1 << (bits - 1))) != 0: # if sign bit is set e.g., 8bit: 128-255
+            val = val - (1 << bits)        # compute negative value
+        return val  
+
+    def close(self):
+        self.serial.close()
+
+class RealTimePlot(QMainWindow):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.settings = QSettings('C:/Users/peelucas/Desktop/python/updated_serial_plotter/config.ini', QSettings.IniFormat)
+        self.setWindowTitle('Real Time Plot')
+        self.setGeometry(800, 50, 900, 900)
+        # self.setWindowIcon(QIcon('icon.png'))
+        self.serial_reader = None
+        self.serialport = self.settings.value("serialport", 'COM4', type=str)
+
+        self.baudrate = self.settings.value("baudrate", 5000000, type=int)
+        self.buffer_size = self.settings.value("buffer_size", 5000, type=int)
+        self.time_data = np.arange(0,self.buffer_size)
+        self.window_size = self.settings.value("window_size", 1000, type=int)
+        self.timer_interval = self.settings.value("timer_interval", 50, type=int)
+
+        self.no_of_channels = self.settings.value('no_of_channels', 1, type=int)
+        self.framestart_trigger = self.settings.value('framestart_trigger', 0xF, type=int)
+        self.dataBit_length_list = self.settings.value("dataBit_length_list", defaultValue=[4,14,20], type=list)
+        self.dataBit_length_list = [int(val) for val in self.dataBit_length_list]
+
+        self.datalength = self.settings.value('datalength', 5, type=int)
+        self.custom_frame_mode = self.settings.value('custom_frame_mode', 1, type=int)
+        self.counter_mode = self.settings.value('counter_mode', 1, type=int)
+
+        self.frame_start_input_length = self.settings.value('frame_start_input_length', 4, type=int)
+        self.frame_start_val = self.settings.value('frame_start_val', 0xF, type=int)
+        self.counter_input_length = self.settings.value('counter_input_length', 4, type=int)
+
+        self.datatype_list = self.settings.value('datatype_list', defaultValue=[1,1,1], type=list)
+        self.datatype_list = [int(val) for val in self.datatype_list]
+        self.datatype = self.settings.value('datatype', 8, type=int)
+
+        # for the gui
+        self.maxBuffer_size = 100000
+        self.maxWindow_size = 100000
+        self.minPlot_height = 200
+
+        self.record_mode = 0
+        self.directory = self.settings.value('directory', "C:\\Users\\peelucas\\Desktop\\python\\files\\pyqt_test", type=str)
+
+        self.init_ui()
+    
+    def init_ui(self):
+        # Create a menu bar
+        self.menu_bar = QMenuBar()
+
+        # Create a menu and add it to the menu bar
+        file_menu = QMenu('File', self)
+        self.menu_bar.addMenu(file_menu)
+
+        # Create an action and add it to the menu
+
+        save_serialplot = QAction('Save', self)
+        file_menu.addAction(save_serialplot)
+        save_serialplot.triggered.connect(self.save_serialplot)
+
+        quit_serialplot = QAction('Quit', self)
+        file_menu.addAction(quit_serialplot)
+        quit_serialplot.triggered.connect(self.quit_serialplot)
+
+        self.setMenuBar(self.menu_bar)
+
+        self.tab_box = QGroupBox("Settings")
+
+        self.tab_widget = QTabWidget()
+        self.tab1 = QWidget()
+        self.tab2 = QWidget()
+        self.tab_widget.addTab(self.tab1, "Port")
+        self.tab_widget.addTab(self.tab2, "Mode")
+
+        #layout and widgets in tab 1
+        self.tab1_layout = QGridLayout()
+        self.tab1_layout.setAlignment(Qt.AlignLeft)
+
+        self.baudrate_label = QLabel("Baudrate:")
+        self.baudrate_LineEdit = QLineEdit()
+        self.baudrate_LineEdit.setText(f"{self.baudrate}")
+        self.baudrate_LineEdit.setMinimumWidth(400)
+
+        self.port_label = QLabel("Port:")
+        self.port_ComboBox = QComboBox()
+        self.port_ComboBox.addItems(self.available_ports())
+        self.port_ComboBox.setCurrentText("COM4")
+        self.port_ComboBox.activated.connect(self.chosen_port)
+        self.port_ComboBox.setMinimumWidth(400)
+
+        #adding widgets to tab 1
+        self.tab1_layout.addWidget(self.port_label, 0, 0)
+        self.tab1_layout.addWidget(self.port_ComboBox, 0, 1)
+        self.tab1_layout.addWidget(self.baudrate_label, 1, 0)
+        self.tab1_layout.addWidget(self.baudrate_LineEdit, 1, 1)
+        self.tab1_layout.setColumnStretch(2, 1) # Add stretchable space item to the right
+
+        #layout and widgets in tab 2
+        self.tab2_layout = QGridLayout()
+        self.tab2_settings_layout = QGridLayout()
+
+        self.no_of_channels_label = QLabel("Number of Channels:")
+        self.no_of_channels_SpinBox = QSpinBox()
+        self.no_of_channels_SpinBox.setValue(self.no_of_channels)
+
+        self.total_frame_size_label = QLabel("Total Frame Size Sent (bytes):")
+        self.total_frame_size_SpinBox = QSpinBox()
+        self.total_frame_size_SpinBox.setMaximum(2147483647)   # Set the maximum value to the maximum limit of int (2,147,483,647)
+        self.total_frame_size_SpinBox.setValue(self.datalength)
+
+        self.buffer_size_label = QLabel("Buffer Size")
+        self.buffer_size_SpinBox = QSpinBox()
+        self.buffer_size_SpinBox.setMaximum(self.maxBuffer_size)
+        self.buffer_size_SpinBox.setValue(self.buffer_size)
+
+        self.window_size_label = QLabel("Window Size:")
+        self.window_size_SpinBox = QSpinBox()
+        self.window_size_SpinBox.setMaximum(self.maxWindow_size)
+        self.window_size_SpinBox.setValue(self.window_size)
+
+        self.custom_frame_CheckBox = QCheckBox('Custom Frame:')
+        if self.custom_frame_mode == 1:
+            self.custom_frame_CheckBox.setChecked(True)
+
+        self.frame_start_label = QLabel("Frame Start:")
+        self.frame_start_LineEdit = QLineEdit()
+        hex_regex = QRegExp("[0-9A-Fa-f]{1,2}")
+        hex_validator = QRegExpValidator(hex_regex)
+        self.frame_start_LineEdit.setValidator(hex_validator)
+        self.frame_start_LineEdit.setText(hex(self.frame_start_val))
+
+        self.frame_start_length_label = QLabel("Length(bits):")
+        self.frame_start_length_SpinBox = QSpinBox()
+        self.frame_start_length_SpinBox.setMaximum(8)
+        self.frame_start_length_SpinBox.setValue(self.frame_start_input_length)
+        self.frame_start_update() # get frame start trigger
+
+        self.counter_CheckBox = QCheckBox('Counter:')
+        if self.counter_mode == 1:
+            self.counter_CheckBox.setChecked(True)
+
+        self.counter_length_label = QLabel("Length (bits):")
+        self.counter_length_LineEdit = QLineEdit()
+        self.counter_length_LineEdit.setText(str(self.counter_input_length))
+
+        self.counter_range_label = QLabel("Range:")
+        self.counter_range_LineEdit = QLineEdit()
+        self.counter_range_calc()
+        self.counter_range_LineEdit.setText(f"0 to {self.counter_range}")
+        self.counter_range_LineEdit.setReadOnly(True) #display range
+
+        self.data_type_label = QLabel("Data Type:")
+        self.datatype_button1 = QRadioButton('8')
+        self.datatype_button2 = QRadioButton('16')
+        self.datatype_button3 = QRadioButton('32')
+
+        if self.datatype == 8:
+            self.datatype_button1.setChecked(True)
+        elif self.datatype == 16:
+            self.datatype_button2.setChecked(True)
+        elif self.datatype == 32:
+            self.datatype_button3.setChecked(True)
+
+        button_box_layout = QHBoxLayout()
+        button_box_layout.addWidget(self.data_type_label)
+        button_box_layout.addWidget(self.datatype_button1)
+        button_box_layout.addWidget(self.datatype_button2)
+        button_box_layout.addWidget(self.datatype_button3)
+
+        self.datatype_group = QButtonGroup(self)
+        self.datatype_group.addButton(self.datatype_button1)
+        self.datatype_group.addButton(self.datatype_button2)
+        self.datatype_group.addButton(self.datatype_button3)
+
+        # Create the QTableView and its widget
+        self.table_view = QTableView()
+        # Create a table model and set it to the table view
+        self.table_model = QStandardItemModel()
+        self.table_view.setModel(self.table_model)
+
+        self.create_plot_settings_widget()
+
+        self.directory_label = QLabel("Directory:")
+        self.directory_LineEdit = QLineEdit()
+        self.directory_LineEdit.setText(self.directory)
+        self.record_button = QPushButton('Record', self)
+
+        # all the connection and updates
+        self.baudrate_LineEdit.editingFinished.connect(self.baudrate_update)
+        self.no_of_channels_SpinBox.valueChanged.connect(self.no_of_channels_update)
+        self.total_frame_size_SpinBox.valueChanged.connect(self.total_frame_size_update)
+        self.buffer_size_SpinBox.valueChanged.connect(self.buffer_size_update)
+        self.window_size_SpinBox.valueChanged.connect(self.window_size_update)
+        self.custom_frame_CheckBox.stateChanged.connect(self.custom_frame_mode_update)
+        self.frame_start_LineEdit.editingFinished.connect(self.frame_start_update)
+        self.frame_start_length_SpinBox.valueChanged.connect(self.frame_start_length_update)
+        self.counter_CheckBox.stateChanged.connect(self.counter_mode_update)
+        self.counter_length_LineEdit.editingFinished.connect(self.counter_length_update)
+        self.datatype_group.buttonClicked.connect(self.datatype_update)
+        self.record_button.clicked.connect(self.record_update)
+        self.directory_LineEdit.editingFinished.connect(self.directory_update)
+
+        #adding widgets to tab 2
+        self.tab2_settings_layout.addWidget(self.no_of_channels_label, 0, 0, 1, 2)
+        self.tab2_settings_layout.addWidget(self.no_of_channels_SpinBox, 0, 2, 1, 2)
+        self.tab2_settings_layout.addWidget(self.total_frame_size_label, 1, 0, 1, 2)
+        self.tab2_settings_layout.addWidget(self.total_frame_size_SpinBox, 1, 2, 1, 2)
+
+        self.tab2_settings_layout.addWidget(self.buffer_size_label, 2, 0, 1, 1)
+        self.tab2_settings_layout.addWidget(self.buffer_size_SpinBox, 2, 1, 1, 1)
+        self.tab2_settings_layout.addWidget(self.window_size_label, 2, 2, 1, 1)
+        self.tab2_settings_layout.addWidget(self.window_size_SpinBox, 2, 3, 1, 1)
+
+        self.tab2_settings_layout.addWidget(self.custom_frame_CheckBox, 3, 0, 1, 1)
+
+        self.tab2_settings_layout.addWidget(self.frame_start_label, 4, 0, 1, 1)
+        self.tab2_settings_layout.addWidget(self.frame_start_LineEdit, 4, 1, 1, 1)
+        self.tab2_settings_layout.addWidget(self.frame_start_length_label, 4, 2, 1, 1)
+        self.tab2_settings_layout.addWidget(self.frame_start_length_SpinBox, 4, 3, 1, 1)
+
+        self.tab2_settings_layout.addWidget(self.counter_CheckBox, 5, 0, 1, 2)
+
+        self.tab2_settings_layout.addWidget(self.counter_length_label, 6, 0, 1, 1)
+        self.tab2_settings_layout.addWidget(self.counter_length_LineEdit, 6, 1, 1, 1)
+        self.tab2_settings_layout.addWidget(self.counter_range_label, 6, 2, 1, 1)
+        self.tab2_settings_layout.addWidget(self.counter_range_LineEdit, 6, 3, 1, 1)
+
+        self.tab2_settings_layout.addLayout(button_box_layout, 7, 0, 1, 4)
+
+        self.tab2_layout.addWidget(self.table_view, 0, 0, 5, 4)
+        self.tab2_layout.addWidget(self.record_button, 5, 2, 2, 2)
+        self.tab2_layout.addWidget(self.directory_label, 5, 0, 2, 1)
+        self.tab2_layout.addWidget(self.directory_LineEdit, 5, 1, 2, 1)
+        self.tab2_layout.addLayout(self.tab2_settings_layout, 0, 4, 7, 4)
+        
+        #tab layouts
+        self.tab1.setLayout(self.tab1_layout)
+        self.tab2.setLayout(self.tab2_layout)
+
+        self.tab_box_layout = QVBoxLayout()
+        self.tab_box_layout.addWidget(self.tab_widget)
+        self.tab_box.setLayout(self.tab_box_layout)
+
+        self.start_button = QPushButton('Start', self)
+        self.start_button.clicked.connect(self.start_serial_reader)
+        self.stop_button = QPushButton('Stop', self)
+        self.stop_button.clicked.connect(self.stop_serial_reader)
+
+        self.pause_button = QPushButton('Pause', self)
+        self.pause_button.clicked.connect(self.pause_plot)
+
+        self.clear_button = QPushButton('Clear', self)
+        self.clear_button.clicked.connect(self.clear_serial_reader)   
+
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.start_button)
+        button_layout.addWidget(self.stop_button)
+        button_layout.addWidget(self.pause_button)
+        button_layout.addWidget(self.clear_button)
+
+        # Create the scroll area and its widget
+        self.scroll_area = QScrollArea()
+        self.scroll_widget = QWidget()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setWidget(self.scroll_widget)
+
+        self.scroll_layout = QVBoxLayout(self.scroll_widget)
+
+        main_layout = QVBoxLayout()
+
+        self.create_plot_widget_counter()
+        if self.counter_mode == 1:
+            self.scroll_layout.addWidget(self.plot_widget_counter)
+        self.create_plot_widgets()
+        for i in range(self.no_of_channels):
+            self.scroll_layout.addWidget(self.plot_widget_list[i])
+        
+        main_layout.addWidget(self.scroll_area, 2)  # add stretch factor of 1
+        main_layout.addLayout(button_layout)
+        main_layout.addWidget(self.tab_box)
+        
+        central_widget = QWidget()
+        central_widget.setLayout(main_layout)
+        self.setCentralWidget(central_widget)
+
+        self.timer = QTimer()
+
+    def baudrate_update(self):
+        self.baudrate = int(self.baudrate_LineEdit.text())
+
+    def datatype_update(self, button):
+        self.datatype = int(button.text())
+        if self.serial_reader is not None:
+            self.serial_reader.datatype = self.datatype
+        print(f"datatype = {self.datatype}")
+
+    def custom_frame_mode_update(self, state):
+        if state == 2:
+            self.custom_frame_mode = 1
+            self.dataBit_length_list_update()
+        else:
+            self.custom_frame_mode = 0
+            self.dataBit_length_list_update()
+    
+    def dataBit_length_list_update(self):
+        self.dataBit_length_list = []
+        if (self.custom_frame_mode == 1) & (self.counter_mode == 1):
+            self.dataBit_length_list.append(self.frame_start_length_SpinBox.value())
+            self.dataBit_length_list.append(int(self.counter_length_LineEdit.text()))
+        elif (self.custom_frame_mode == 0) & (self.counter_mode == 1):
+            self.dataBit_length_list.append(int(self.counter_length_LineEdit.text()))
+        elif (self.custom_frame_mode == 1) & (self.counter_mode == 0):
+            self.dataBit_length_list.append(self.frame_start_length_SpinBox.value())
+        for i in range(self.no_of_channels):
+            self.dataBit_length_list.append(int(self.table_view.indexWidget(self.table_model.index(i, 1)).value()))
+        if self.serial_reader is not None:
+            self.serial_reader.dataBit_length_list = self.dataBit_length_list
+            print(f"{[data for data in self.serial_reader.dataBit_length_list]}")
+        print(f"{[data for data in self.dataBit_length_list]}")
+        print(f"datatype_list = {self.datatype_list}")
+
+    def counter_mode_update(self, state):
+        if state == 2:
+            self.counter_mode = 1
+            self.remove_plot_widgets()
+            self.scroll_layout.addWidget(self.plot_widget_counter)
+            for i in range(self.no_of_channels):
+                self.scroll_layout.addWidget(self.plot_widget_list[i])
+            self.dataBit_length_list_update()
+        else:
+            self.counter_mode = 0
+            self.scroll_layout.removeWidget(self.plot_widget_counter)
+            self.dataBit_length_list_update()
+    
+    def total_frame_size_update(self):
+        self.datalength = self.total_frame_size_SpinBox.value()
+        if self.serial_reader is not None:
+            self.serial_reader.datalength = self.datalength
+
+    def buffer_size_update(self):
+        self.buffer_size = self.buffer_size_SpinBox.value()
+        if self.serial_reader is not None:
+            self.serial_reader.buffer_size = self.buffer_size
+        self.time_data = np.arange(0,self.buffer_size)
+        if self.counter_mode == 1:
+            self.amplitude_data_counter = np.resize(self.amplitude_data_counter,self.buffer_size)
+        
+        for i in range(self.no_of_channels):
+            self.amplitude_data_list[i] = np.resize(self.amplitude_data_list[i], self.buffer_size)
+
+    def window_size_update(self):
+        self.window_size = self.window_size_SpinBox.value()
+    
+    def frame_start_update(self):
+        self.frame_start_val = int(self.frame_start_LineEdit.text(),16)
+        self.frame_start = bin(int(self.frame_start_LineEdit.text(), 16))[2:]
+        self.framestart_trigger_update()
+
+    def frame_start_length_update(self):
+        if self.custom_frame_mode == 1:
+            self.dataBit_length_list_update()
+            self.framestart_trigger_update()
+        self.frame_start_input_length = self.frame_start_length_SpinBox.value()
+
+    def framestart_trigger_update(self):
+        if len(self.frame_start) < self.frame_start_length_SpinBox.value():
+            self.framestart_trigger = format(int(self.frame_start,2), f"0{self.frame_start_length_SpinBox.value()}b")
+        else:
+            self.framestart_trigger = str(self.frame_start)[-self.frame_start_length_SpinBox.value():]
+        if self.serial_reader is not None:
+            self.serial_reader.framestart_trigger = int(self.framestart_trigger,2)
+        self.framestart_trigger = int(self.framestart_trigger,2)
+        print(f"{self.framestart_trigger}")
+
+    def counter_length_update(self):
+        if (self.counter_mode == 1) & (self.custom_frame_mode == 1):
+            self.dataBit_length_list_update()
+        elif (self.counter_mode == 1):
+            self.dataBit_length_list_update()
+        self.counter_input_length = int(self.counter_length_LineEdit.text())
+        self.counter_range_calc()
+
+    def counter_range_calc(self):
+        self.counter_range = np.power(2,int(self.counter_length_LineEdit.text()))-1
+        self.counter_range_LineEdit.setText(f"0 to {self.counter_range}")
+        
+    def no_of_channels_update(self):
+        self.remove_plot_widgets()
+        self.no_of_channels = self.no_of_channels_SpinBox.value()
+        if self.serial_reader is not None:
+            self.serial_reader.no_of_channels = self.no_of_channels
+        self.update_plot_settings_widget()
+        self.create_plot_widgets()
+        for i in range(self.no_of_channels):
+            self.scroll_layout.addWidget(self.plot_widget_list[i])
+        
+    def create_plot_widget_counter(self):
+        self.plot_widget_counter = pg.PlotWidget()
+        self.plot_widget_counter.setMinimumHeight(self.minPlot_height)
+        self.plot_widget_counter.setBackground('w') 
+        self.plot_item_counter = self.plot_widget_counter.getPlotItem()
+        self.plot_item_counter.showGrid(True, True)
+        self.plot_item_counter.setLabel('bottom', 'Time', 's')
+        self.plot_item_counter.setLabel('left', 'Value', '')
+        self.plot_item_counter.setTitle('Counter')
+        self.plot_data_item_counter = self.plot_item_counter.plot(pen=pg.mkPen('b', width=2))
+
+        self.amplitude_data_counter = np.zeros(self.buffer_size)
+    
+    def create_plot_widgets(self):
+        self.amplitude_data_list = []
+        self.plot_widget_list = []
+        self.plot_data_item_list = []
+
+        for i in range(self.no_of_channels):
+            plot_widget = pg.PlotWidget()
+            plot_widget.setMinimumHeight(self.minPlot_height)
+            plot_widget.setBackground('w') 
+            plot_item = plot_widget.getPlotItem()
+            plot_item.showGrid(True, True)
+            plot_item.setLabel('bottom', 'Time', 's')
+            plot_item.setLabel('left', 'Value', '')
+            plot_item.setTitle(f'Channel {i+1}')
+            plot_data_item = plot_item.plot(pen=pg.mkPen('b', width=2))
+
+            self.plot_widget_list.append(plot_widget)
+            self.plot_data_item_list.append(plot_data_item)
+            self.amplitude_data_list.append(np.zeros(self.buffer_size))
+
+    def remove_plot_widgets(self):
+        prev_no_of_channels = self.no_of_channels
+        for i in range(prev_no_of_channels):
+            self.scroll_layout.removeWidget(self.plot_widget_list[i])
+
+    def create_plot_settings_widget(self):
+        self.table_model.clear()
+        self.table_model.setHorizontalHeaderLabels(['Channel', 'Data Size (bits)', 'Data Type'])
+        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+            
+        rows = len(self.datatype_list)
+
+        rows = max(len(self.datatype_list), self.no_of_channels)
+        self.table_model.setRowCount(rows)
+
+        for i in range(rows):
+            data_size_spinbox = QSpinBox()
+            data_size_spinbox.setValue(self.dataBit_length_list[i+self.counter_mode+self.custom_frame_mode])
+            data_size_spinbox.valueChanged.connect(self.dataBit_length_list_update)
+
+            signed_radiobutton1 = QRadioButton("Signed")
+            unsigned_radiobutton2 = QRadioButton("Unsigned")
+            datatype_radio_button_group = QButtonGroup()
+            datatype_radio_button_group.addButton(signed_radiobutton1, 1)
+            datatype_radio_button_group.addButton(unsigned_radiobutton2, 0)
+            index = i  # Create a local variable with the current value of i
+            signed_radiobutton1.clicked.connect(lambda _, btn=signed_radiobutton1, idx=index: self.datatype_sign_unsign_update(btn, idx))
+            unsigned_radiobutton2.clicked.connect(lambda _, btn=unsigned_radiobutton2, idx=index: self.datatype_sign_unsign_update(btn, idx))
+
+            widget = QWidget()
+            layout = QHBoxLayout(widget)
+            layout.addWidget(signed_radiobutton1)
+            layout.addWidget(unsigned_radiobutton2)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setAlignment(Qt.AlignCenter)
+            widget.setLayout(layout)
+
+            # Set radio button based on saved value
+            if self.datatype_list[i] == 1:
+                signed_radiobutton1.setChecked(True)
+            else:
+                unsigned_radiobutton2.setChecked(True)
+
+            self.table_model.setItem(i, 0, QStandardItem(f'Channel {i+1}'))
+            self.table_view.setIndexWidget(self.table_model.index(i, 1), data_size_spinbox)
+            self.table_view.setIndexWidget(self.table_model.index(i, 2), widget)
+
+        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table_view.resizeColumnsToContents()
+
+    def update_plot_settings_widget(self):
+        # Determine the current number of rows in the table view
+        current_rows = self.table_model.rowCount()
+
+        # If the number of channels has increased, create new rows
+        if self.no_of_channels > current_rows:
+            for i in range(current_rows, self.no_of_channels):
+                data_size_spinbox = QSpinBox()
+                data_size_spinbox.valueChanged.connect(self.dataBit_length_list_update)
+                signed_radiobutton1 = QRadioButton("Signed")
+                unsigned_radiobutton2 = QRadioButton("Unsigned")
+                datatype_radio_button_group = QButtonGroup()
+                index = i  # Create a local variable with the current value of i
+                signed_radiobutton1.clicked.connect(lambda _, btn=signed_radiobutton1, idx=index: self.datatype_sign_unsign_update(btn, idx))
+                unsigned_radiobutton2.clicked.connect(lambda _, btn=unsigned_radiobutton2, idx=index: self.datatype_sign_unsign_update(btn, idx))
+                datatype_radio_button_group.addButton(signed_radiobutton1, 1)
+                datatype_radio_button_group.addButton(unsigned_radiobutton2, 0)
+                widget = QWidget()
+                layout = QHBoxLayout(widget)
+                layout.addWidget(signed_radiobutton1)
+                layout.addWidget(unsigned_radiobutton2)
+                unsigned_radiobutton2.setChecked(True)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setAlignment(Qt.AlignCenter)
+                widget.setLayout(layout)
+                self.table_model.setItem(i, 0, QStandardItem(f'Channel {i+1}'))
+                self.table_view.setIndexWidget(self.table_model.index(i, 1), data_size_spinbox)
+                self.table_view.setIndexWidget(self.table_model.index(i, 2), widget)
+                self.datatype_list.append(0)
+        # If the number of channels has decreased, remove excess rows
+        elif self.no_of_channels < current_rows:
+            for i in range(current_rows - 1, self.no_of_channels - 1, -1):
+                self.table_model.removeRow(i)
+                self.datatype_list.pop()
+
+    def datatype_sign_unsign_update(self, button, index):
+        if len(self.datatype_list) != self.no_of_channels: 
+            self.datatype_list = [0]*self.no_of_channels
+        if button.text() == "Signed":
+            self.datatype_list[index] = 1
+        else:
+            self.datatype_list[index] = 0
+
+        if self.serial_reader is not None:
+            self.serial_reader.datatype_list = self.datatype_list
+
+        print(f"datatype_list = {self.datatype_list}")
+
+    def chosen_port(self):
+        self.serialport = self.port_ComboBox.currentText()
+
+    def start_serial_reader(self):
+        if self.serial_reader is not None:
+            self.stop_serial_reader()
+        try:
+            self.serial_reader = SerialReader(self.serialport, self.baudrate, self.no_of_channels, self.datalength, self.custom_frame_mode, 
+                                              self.counter_mode, self.framestart_trigger, self.dataBit_length_list, self.datatype_list, self.datatype)
+            self.timer.timeout.connect(self.serial_reader.read)
+            self.serial_reader.data_received.connect(self.update_plot)
+            if self.counter_mode == 1:
+                self.serial_reader.counter_received.connect(self.update_plot_counter)
+            self.timer.start(self.timer_interval)
+            self.start_button.setEnabled(False)
+            self.port_ComboBox.setEnabled(False)
+            self.pause_button.setEnabled(True)
+            self.stop_button.setEnabled(True)
+        except serial.SerialException as e:
+            QMessageBox.warning(self, 'Error', str(e))
+
+
+    def stop_serial_reader(self):
+        self.time_data = np.arange(0, self.buffer_size)
+        if self.counter_mode == 1:
+            self.amplitude_data_counter = np.zeros(self.buffer_size)
+        for i in range(self.no_of_channels):
+            self.amplitude_data_list[i] = np.zeros(self.buffer_size)
+        if self.serial_reader is not None:
+            self.timer.stop()
+            if self.serial_reader.serial.isOpen():
+                self.serial_reader.close()
+                self.start_button.setEnabled(True)
+                self.stop_button.setEnabled(False)
+                self.pause_button.setEnabled(False)
+                self.port_ComboBox.setEnabled(True)
+    
+    def available_ports(self):
+        return [port.device for port in serial.tools.list_ports.comports()]
+    
+    def clear_serial_reader(self):
+        self.time_data = np.arange(0, self.buffer_size)
+        if self.counter_mode == 1:
+            self.amplitude_data_counter = np.zeros(self.buffer_size)
+            self.plot_data_item_counter.setData(self.time_data, self.amplitude_data_counter)
+        for i in range(self.no_of_channels):
+            self.amplitude_data_list[i] = np.zeros(self.buffer_size)
+            self.plot_data_item_list[i].setData(self.time_data, self.amplitude_data_list[i])
+    
+    def pause_plot(self):
+        if self.timer.isActive():
+            self.timer.stop()
+            self.pause_button.setText('Resume')
+            self.serial_reader.is_paused = True
+        else:
+            self.timer.start(self.timer_interval)
+            self.pause_button.setText('Pause')
+            self.serial_reader.is_paused = False
+
+    def update_plot(self, data):
+        for i in range(self.no_of_channels):
+            self.amplitude_data_list[i] = np.roll(self.amplitude_data_list[i], -1)
+            self.amplitude_data_list[i][-1:] = data[i]
+            self.plot_data_item_list[i].setData(self.time_data, self.amplitude_data_list[i])
+            self.plot_widget_list[i].setXRange(self.time_data.max()-self.window_size, self.time_data.max())
+            self.plot_widget_list[i].setYRange(self.amplitude_data_list[i].min(), self.amplitude_data_list[i].max())
+            if self.record_mode == 1:
+                self.recorded_data.append([data[i]])
+
+    def update_plot_counter(self, counter_data):
+        print(f"counter_data = {counter_data}")
+        self.amplitude_data_counter = np.roll(self.amplitude_data_counter, -1)
+        self.amplitude_data_counter[-1:] = counter_data
+        self.plot_data_item_counter.setData(self.time_data, self.amplitude_data_counter)
+        self.plot_widget_counter.setXRange(self.time_data.max()-self.window_size, self.time_data.max())
+        self.plot_widget_counter.setYRange(self.amplitude_data_counter.min(), self.amplitude_data_counter.max())
+
+    def record_update(self):
+        if self.record_mode == 0:
+            self.record_mode = 1
+            self.recorded_data = []
+            self.record_button.setStyleSheet("color: red;")
+        else:
+            self.record_mode = 0
+            self.save_record()
+            self.record_button.setStyleSheet("")
+
+    def directory_update(self):
+        self.directory = self.directory_LineEdit.text()
+
+    def save_record(self):
+        filename = f"recorded_data_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
+        filepath = os.path.join(self.directory, filename)
+        with open(filepath, 'w', newline='') as file:
+            writer = csv.writer(file)
+            headers = []
+            for i in range(self.no_of_channels):
+                channel_header = f'Channel {i+1} Timestamp'
+                data_header = f'Data {i+1}'
+                blank = ''
+                headers.extend([channel_header, data_header, blank])
+            writer.writerow(headers)  # Write header row if desired
+
+            num_rows = int(len(self.recorded_data)/self.no_of_channels)
+
+            for row_index in range(num_rows):
+                row_data = []
+                for i in range(self.no_of_channels):
+                    channel_timestamp = row_index
+                    channel_data = self.recorded_data[row_index*self.no_of_channels+i][0]
+                    blank = ''
+                    row_data.extend([channel_timestamp, channel_data, blank])
+                writer.writerow(row_data)
+
+    def save_serialplot(self):
+        # Create the QCloseEvent object and pass it to the quit_serialplot_close function
+        close_event = QCloseEvent()
+        self.save_settings(close_event)
+
+    def quit_serialplot(self):
+        QApplication.quit()
+
+    def save_settings(self, event):
+        # Save the current configuration settings to a file
+        self.settings.setValue('serialport', self.serialport)
+        self.settings.setValue('baudrate', self.baudrate)
+        self.settings.setValue('buffer_size', self.buffer_size)
+        self.settings.setValue('window_size', self.window_size)
+        self.settings.setValue('timer_interval', self.timer_interval)
+        self.settings.setValue('baudrate', self.baudrate)
+        self.settings.setValue('no_of_channels', self.no_of_channels)
+        self.settings.setValue('framestart_trigger', self.framestart_trigger)
+        self.settings.setValue('dataBit_length_list', self.dataBit_length_list)
+        self.settings.setValue('datalength', self.datalength)
+        self.settings.setValue('custom_frame_mode', self.custom_frame_mode)
+        self.settings.setValue('counter_mode', self.counter_mode)
+        self.settings.setValue('frame_start_input_length', self.frame_start_input_length)
+        self.settings.setValue('frame_start_val', self.frame_start_val)
+        self.settings.setValue('counter_input_length', self.counter_input_length)
+        self.settings.setValue('datatype_list', self.datatype_list)
+        self.settings.setValue('datatype', self.datatype)
+        self.settings.setValue('directory', self.directory)
+
+        event.accept()
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    win = RealTimePlot()
+    win.show()
+    sys.exit(app.exec_())
