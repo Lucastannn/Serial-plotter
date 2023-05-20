@@ -1,3 +1,5 @@
+#change path on line 146(save settings .ini) and line 182(save recording file)
+#save settings for gui, navigate to file(top left), press save
 import sys
 import serial
 import csv
@@ -128,10 +130,10 @@ class SerialReader(QObject):
         print(f"swapped data = {swapped_data}")
         return swapped_data
 
+    #twos complement function
     def twos_comp(self, val, bits):
-        """compute the 2's complement of int value val"""
-        if (val & (1 << (bits - 1))) != 0: # if sign bit is set e.g., 8bit: 128-255
-            val = val - (1 << bits)        # compute negative value
+        if (val & (1 << (bits - 1))) != 0:
+            val = val - (1 << bits)
         return val  
 
     def close(self):
@@ -167,7 +169,7 @@ class RealTimePlot(QMainWindow):
         self.frame_start_val = self.settings.value('frame_start_val', 0xF, type=int)
         self.counter_input_length = self.settings.value('counter_input_length', 4, type=int)
 
-        self.datatype_list = self.settings.value('datatype_list', defaultValue=[1,1,1], type=list)
+        self.datatype_list = self.settings.value('datatype_list', defaultValue=[1], type=list)
         self.datatype_list = [int(val) for val in self.datatype_list]
         self.datatype = self.settings.value('datatype', 8, type=int)
 
