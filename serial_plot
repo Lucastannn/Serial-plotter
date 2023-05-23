@@ -1,4 +1,4 @@
-#change path on line 146(save settings .ini) and line 182(save recording file)
+#change path on line 164(save settings .ini) and line 202(save recording file)
 #save settings for gui, navigate to file(top left), press save
 import sys
 import serial
@@ -284,8 +284,10 @@ class RealTimePlot(QMainWindow):
         self.checksum_CheckBox = QCheckBox('Checksum')
         if self.custom_frame_mode == 1:
             self.custom_frame_CheckBox.setChecked(True)
+            self.total_frame_size_SpinBox.setDisabled(False)
         else:
             self.checksum_CheckBox.setDisabled(True)
+            self.total_frame_size_SpinBox.setDisabled(True)
         if self.checksum_mode == 1:
             self.checksum_CheckBox.setChecked(True)
 
@@ -482,10 +484,12 @@ class RealTimePlot(QMainWindow):
         if state == 2:
             self.custom_frame_mode = 1
             self.checksum_CheckBox.setDisabled(False)
+            self.total_frame_size_SpinBox.setDisabled(False)
             self.dataBit_length_list_update()
         else:
             self.custom_frame_mode = 0
             self.checksum_CheckBox.setDisabled(True)
+            self.total_frame_size_SpinBox.setDisabled(True)
             self.dataBit_length_list_update()
         if self.serial_reader is not None:
             self.serial_reader.custom_frame_mode = self.custom_frame_mode
