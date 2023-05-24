@@ -42,26 +42,20 @@ class SerialReader(QObject):
             try:
                 if not self.is_paused:
                     data = self.serial.read(self.serial.in_waiting)
-                    if data:
+                    if (len(data)%self.datalength == 0):
                         #print(f"data = {[data for data in data]}")
                         #custom frame
                         if self.custom_frame_mode == 1: 
-                            frame_start_length = int(self.dataBit_length_list[0])
-                            frame_start_mask = (1 << frame_start_length) - 1
                             i = 0
                             while len(data) - i >= self.datalength:
                                 self.channel_data = []
-                                if ((data[i] >> (8-frame_start_length)) & frame_start_mask) == self.framestart_trigger:
-                                    frame_bit = data[i]
+                                if (((data[i] >> (8-self.frame_start_length)) & self.frame_start_mask) == self.framestart_trigger):
                                     byte_group = data[i+1:i+self.datalength]
                                     byte_group = self.byteswap(byte_group)
                                     if self.checksum_mode == 1:
                                         correct_checksum = byte_group[-1]
                                         byte_group = byte_group[:-1]
                                         self.checksum_processing(correct_checksum, byte_group)
-                                    byte_array = bytearray(byte_group)
-                                    byte_array.insert(0,frame_bit)
-                                    byte_group = bytes(byte_array)
                                     self.processing(byte_group)
                                     i = i + self.datalength
                                 else:
@@ -87,19 +81,22 @@ class SerialReader(QObject):
                 self.serial.close()  # Close the current serial connection
                 time.sleep(1)
                 self.serial.open()  # Open a new serial connection
+                
+    def frame_start_mask_func(self):
+        self.frame_start_length = int(self.dataBit_length_list[0])
+        self.frame_start_mask = (1 << int(self.dataBit_length_list[0])) - 1
 
     def processing(self,data): #process and sends data to plot
         bits = ''.join(format(byte, '08b') for byte in data)
         #print(f"bits = {[data for data in bits]}")
         prev_data_length = 0
-        if (self.custom_frame_mode == 1) & (self.counter_mode == 1):
-            start_bit = self.dataBit_length_list[0] + self.dataBit_length_list[1]
-            self.counter = bits[self.dataBit_length_list[0]:self.dataBit_length_list[0]+self.dataBit_length_list[1]]
-        elif (self.custom_frame_mode == 1) & (self.counter_mode == 0):
-            start_bit = self.dataBit_length_list[0]
-        elif (self.custom_frame_mode == 0) & (self.counter_mode == 1):
-            start_bit = self.dataBit_length_list[0]
-            self.counter = bits[:self.dataBit_length_list[0]]
+        if (self.counter_mode == 1):
+            if (self.custom_frame_mode == 1):
+                start_bit = self.dataBit_length_list[1]
+                self.counter = bits[:self.dataBit_length_list[1]]
+            else:
+                start_bit = self.dataBit_length_list[0]
+                self.counter = bits[:self.dataBit_length_list[0]]
         else:
             start_bit = 0
         for i in range(self.no_of_channels):
@@ -172,7 +169,8 @@ class RealTimePlot(QMainWindow):
         self.buffer_size = self.settings.value("buffer_size", 5000, type=int)
         self.time_data = np.arange(0,self.buffer_size)
         self.window_size = self.settings.value("window_size", 1000, type=int)
-        self.timer_interval = self.settings.value("timer_interval", 50, type=int)
+        #self.timer_interval = self.settings.value("timer_interval", 50, type=int)
+        self.timer_interval = 30 #interval that read() is called
 
         self.no_of_channels = self.settings.value('no_of_channels', 1, type=int)
         self.framestart_trigger = self.settings.value('framestart_trigger', 0xF, type=int)
@@ -515,6 +513,7 @@ class RealTimePlot(QMainWindow):
             self.dataBit_length_list.append(int(self.table_view.indexWidget(self.table_model.index(i, 1)).value()))
         if self.serial_reader is not None:
             self.serial_reader.dataBit_length_list = self.dataBit_length_list
+            self.serial_reader.frame_start_mask_func()
 
     def counter_mode_update(self, state):
         if state == 2:
@@ -740,6 +739,7 @@ class RealTimePlot(QMainWindow):
                                               self.datatype_list, self.datatype)
             self.timer.timeout.connect(self.serial_reader.read)
             self.serial_reader.data_received.connect(self.update_plot)
+            self.serial_reader.frame_start_mask_func()
             if self.counter_mode == 1:
                 self.serial_reader.counter_received.connect(self.update_plot_counter)
             if self.checksum_mode == 1:
