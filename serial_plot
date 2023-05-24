@@ -83,7 +83,7 @@ class SerialReader(QObject):
             except serial.SerialException as e:
                 print(f"Serial Exception: {e}")
                 print("Attempting to reconnect...")
-                self.serial_reader.serial.reset_input_buffer()  # Clear the input buffer
+                self.serial.reset_input_buffer()  # Clear the input buffer
                 self.serial.close()  # Close the current serial connection
                 time.sleep(1)
                 self.serial.open()  # Open a new serial connection
