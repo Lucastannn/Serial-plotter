@@ -35,7 +35,7 @@ To change the checksum formula: Edit checksum_processing()
 ## Note
 - Max Frame start length is 8 bits
 - Total Frame Start Size Sent (bytes) includes the framestart byte, frame and checksum byte
-- Change file path for saving settings: self.settings = QSettings('~/config.ini', QSettings.IniFormat)
+- Change file path for saving settings: file_path = '~/config.ini', QSettings.IniFormat (the file will be created if does not exist)
 - Change file path for saving recordings: self.directory = self.settings.value('directory', "~/directoy_file", type=str) 
 
 ## Acknowledgments
