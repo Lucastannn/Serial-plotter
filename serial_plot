@@ -606,6 +606,7 @@ class RealTimePlot(QMainWindow):
             self.serial_reader.no_of_channels = self.no_of_channels
         self.update_plot_settings_widget()
         self.create_plot_widgets()
+        self.dataBit_length_list_update()
         for i in range(self.no_of_channels):
             self.scroll_layout.addWidget(self.plot_widget_list[i])
         
