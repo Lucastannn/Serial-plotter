@@ -1,4 +1,4 @@
-#change path on line 173(save settings .ini) and line 212(save recording file)
+#change path on line 164(save settings .ini) and line 202(save recording file)
 #save settings for gui, navigate to file(top left), press save
 import sys
 import serial
@@ -28,7 +28,7 @@ class SerialReader(QObject):
         self.framestart_trigger = framestart_trigger
         self.is_started = False
         self.no_of_channels = no_of_channels
-        self.datalength = datalength
+        self.datalength = int(datalength)
         self.custom_frame_mode = custom_frame_mode
         self.counter_mode = counter_mode
         self.checksum_mode = checksum_mode
@@ -111,7 +111,7 @@ class SerialReader(QObject):
             prev_data_length = prev_data_length + data_length
 
         #send data to plot
-        if not self.is_paused: #if paused, data is still processed but not saved/plotted
+        if not self.is_paused:
             #send data to plot
             if self.counter_mode == 1:
                 self.counter = np.uint16(int(self.counter, 2))
@@ -170,7 +170,9 @@ class RealTimePlot(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.settings = QSettings('C:/Users/User/Desktop/config.ini', QSettings.IniFormat)
+        file_path = 'C:\\Users\\peelucas\\Desktop\\python\\files\\pyqt_test\\config.ini'
+        self.settings = QSettings(file_path, QSettings.IniFormat)
+        QSettings.setFallbacksEnabled(self.settings,False)
         self.setWindowTitle('Real Time Plot')
         self.setGeometry(800, 50, 750, 900)
         # self.setWindowIcon(QIcon('icon.png'))
@@ -178,18 +180,17 @@ class RealTimePlot(QMainWindow):
         self.serialport = self.settings.value("serialport", 'COM4', type=str)
 
         self.baudrate = self.settings.value("baudrate", 5000000, type=int)
-        self.buffer_size = self.settings.value("buffer_size", 5000, type=int)
+        self.buffer_size = self.settings.value("buffer_size", 10000, type=int)
         self.time_data = np.arange(0,self.buffer_size)
         self.window_size = self.settings.value("window_size", 1000, type=int)
         #self.timer_interval = self.settings.value("timer_interval", 50, type=int)
         self.timer_interval = 30 #interval that read() is called
 
-        self.no_of_channels = self.settings.value('no_of_channels', 1, type=int)
+        self.no_of_channels = self.settings.value('no_of_channels', 2, type=int)
         self.framestart_trigger = self.settings.value('framestart_trigger', 0xF, type=int)
-        self.dataBit_length_list = self.settings.value("dataBit_length_list", defaultValue=[4,14,20], type=list)
+        self.dataBit_length_list = self.settings.value("dataBit_length_list", defaultValue=[4,4,8,8], type=list)
         self.dataBit_length_list = [int(val) for val in self.dataBit_length_list]
 
-        self.datalength = self.settings.value('datalength', 5, type=int)
         self.custom_frame_mode = self.settings.value('custom_frame_mode', 1, type=int)
         self.counter_mode = self.settings.value('counter_mode', 1, type=int)
         self.checksum_mode = self.settings.value('checksum_mode', 1, type=int)
@@ -198,7 +199,7 @@ class RealTimePlot(QMainWindow):
         self.frame_start_val = self.settings.value('frame_start_val', 0xF, type=int)
         self.counter_input_length = self.settings.value('counter_input_length', 4, type=int)
 
-        self.datatype_list = self.settings.value('datatype_list', defaultValue=[1], type=list)
+        self.datatype_list = self.settings.value('datatype_list', defaultValue=[0,0], type=list)
         self.datatype_list = [int(val) for val in self.datatype_list]
         self.datatype = self.settings.value('datatype', 8, type=int)
         
@@ -209,7 +210,7 @@ class RealTimePlot(QMainWindow):
         self.minPlot_height = 200
 
         self.record_mode = 0
-        self.directory = self.settings.value('directory', "C:\\Users\\User\\Desktop", type=str)
+        self.directory = self.settings.value('directory', "C:\\Users\\peelucas\\Desktop\\python\\files\\pyqt_test", type=str)
 
         self.init_ui()
     
@@ -222,7 +223,6 @@ class RealTimePlot(QMainWindow):
         self.menu_bar.addMenu(file_menu)
 
         # Create an action and add it to the menu
-
         save_serialplot = QAction('Save', self)
         file_menu.addAction(save_serialplot)
         save_serialplot.triggered.connect(self.save_serialplot)
@@ -276,9 +276,11 @@ class RealTimePlot(QMainWindow):
 
         self.total_frame_size_label = QLabel("Total Frame Size Sent (bytes):")
         self.total_frame_size_label.setToolTip("Includes: FrameStart byte, Data bytes, checksum byte")
-        self.total_frame_size_SpinBox = QSpinBox()
-        self.total_frame_size_SpinBox.setMaximum(2147483647)   # Set the maximum value to the maximum limit of int (2,147,483,647)
-        self.total_frame_size_SpinBox.setValue(self.datalength)
+
+        self.total_frame_size_LineEdit = QLineEdit()
+        self.datalength_calc()
+        self.total_frame_size_LineEdit.setText(f"{self.datalength}")
+        self.total_frame_size_LineEdit.setReadOnly(True) #display range
 
         self.buffer_size_label = QLabel("Buffer Size")
         self.buffer_size_SpinBox = QSpinBox()
@@ -294,10 +296,8 @@ class RealTimePlot(QMainWindow):
         self.checksum_CheckBox = QCheckBox('Checksum')
         if self.custom_frame_mode == 1:
             self.custom_frame_CheckBox.setChecked(True)
-            self.total_frame_size_SpinBox.setDisabled(False)
         else:
             self.checksum_CheckBox.setDisabled(True)
-            self.total_frame_size_SpinBox.setDisabled(True)
         if self.checksum_mode == 1:
             self.checksum_CheckBox.setChecked(True)
 
@@ -371,7 +371,6 @@ class RealTimePlot(QMainWindow):
         # all the connection and updates
         self.baudrate_LineEdit.editingFinished.connect(self.baudrate_update)
         self.no_of_channels_SpinBox.valueChanged.connect(self.no_of_channels_update)
-        self.total_frame_size_SpinBox.valueChanged.connect(self.total_frame_size_update)
         self.buffer_size_SpinBox.valueChanged.connect(self.buffer_size_update)
         self.window_size_SpinBox.valueChanged.connect(self.window_size_update)
         self.custom_frame_CheckBox.stateChanged.connect(self.custom_frame_mode_update)
@@ -388,7 +387,7 @@ class RealTimePlot(QMainWindow):
         self.tab2_settings_layout.addWidget(self.no_of_channels_label, 0, 0, 1, 2)
         self.tab2_settings_layout.addWidget(self.no_of_channels_SpinBox, 0, 2, 1, 2)
         self.tab2_settings_layout.addWidget(self.total_frame_size_label, 1, 0, 1, 2)
-        self.tab2_settings_layout.addWidget(self.total_frame_size_SpinBox, 1, 2, 1, 2)
+        self.tab2_settings_layout.addWidget(self.total_frame_size_LineEdit, 1, 2, 1, 2)
 
         self.tab2_settings_layout.addWidget(self.buffer_size_label, 2, 0, 1, 1)
         self.tab2_settings_layout.addWidget(self.buffer_size_SpinBox, 2, 1, 1, 1)
@@ -490,16 +489,25 @@ class RealTimePlot(QMainWindow):
         if self.serial_reader is not None:
             self.serial_reader.datatype = self.datatype
 
+    def datalength_calc(self):
+        total = 0
+        for bit_length in self.dataBit_length_list:
+            total += bit_length
+        self.datalength = ((total + 7) // 8)
+        self.total_frame_size_LineEdit.setText(f"{self.datalength}")
+        if self.serial_reader is not None:
+            self.serial_reader.datalength = self.datalength
+
+        print(f"{self.datalength}")
+
     def custom_frame_mode_update(self, state):
         if state == 2:
             self.custom_frame_mode = 1
             self.checksum_CheckBox.setDisabled(False)
-            self.total_frame_size_SpinBox.setDisabled(False)
             self.dataBit_length_list_update()
         else:
             self.custom_frame_mode = 0
             self.checksum_CheckBox.setDisabled(True)
-            self.total_frame_size_SpinBox.setDisabled(True)
             self.dataBit_length_list_update()
         if self.serial_reader is not None:
             self.serial_reader.custom_frame_mode = self.custom_frame_mode
@@ -523,6 +531,7 @@ class RealTimePlot(QMainWindow):
             self.dataBit_length_list.append(self.frame_start_length_SpinBox.value())
         for i in range(self.no_of_channels):
             self.dataBit_length_list.append(int(self.table_view.indexWidget(self.table_model.index(i, 1)).value()))
+        self.datalength_calc()
         if self.serial_reader is not None:
             self.serial_reader.dataBit_length_list = self.dataBit_length_list
             self.serial_reader.frame_start_mask_func()
@@ -541,11 +550,6 @@ class RealTimePlot(QMainWindow):
             self.dataBit_length_list_update()
         if self.serial_reader is not None:
             self.serial_reader.counter_mode = self.counter_mode
-    
-    def total_frame_size_update(self):
-        self.datalength = self.total_frame_size_SpinBox.value()
-        if self.serial_reader is not None:
-            self.serial_reader.datalength = self.datalength
 
     def buffer_size_update(self):
         self.buffer_size = self.buffer_size_SpinBox.value()
@@ -885,7 +889,6 @@ class RealTimePlot(QMainWindow):
         self.settings.setValue('no_of_channels', self.no_of_channels)
         self.settings.setValue('framestart_trigger', self.framestart_trigger)
         self.settings.setValue('dataBit_length_list', self.dataBit_length_list)
-        self.settings.setValue('datalength', self.datalength)
         self.settings.setValue('custom_frame_mode', self.custom_frame_mode)
         self.settings.setValue('counter_mode', self.counter_mode)
         self.settings.setValue('checksum_mode', self.checksum_mode)
